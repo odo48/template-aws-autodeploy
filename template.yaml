@@ -1,0 +1,441 @@
+AWSTemplateFormatVersion: 2010-09-09
+
+Description: CloudFormation template for a frontend project
+
+Parameters:
+  # When adding a parameter is it needed to have a type
+  # and the default parameter is the actual value
+  BucketName:
+    Type: String
+    Default: template-stack-test
+
+  # *** This value must always be passed in when creating / updating stack
+  # *** Don't push this file with the Default value hardcoded ***
+  # "NoEcho" is set to true, for security, so token won't be visible when examining the resulting stack
+  GitHubOAuthToken:
+    Type: String
+    NoEcho: true
+    MinLength: 40
+    MaxLength: 40
+
+  GitHubOwner:
+    Type: String
+    Default: odo48
+    AllowedPattern: "[A-Za-z0-9-]+"
+
+  GitHubRepo:
+    Type: String
+    Default: debugging-workshop
+
+  GitHubBranch:
+    Type: String
+    Default: main
+
+  CodeBuildEnvironmentImage:
+    Type: String
+    Default: "aws/codebuild/standard:4.0"
+
+Resources:
+  # Creating S3 Bucket that will contain the project
+  Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref BucketName
+      AccessControl: Private
+
+  # Configure the bucket as a CloudFront Origin - this will modify the policy for the CloudFront
+  ReadPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref Bucket
+      PolicyDocument:
+        Statement:
+          - Action: "s3:GetObject"
+            Effect: Allow
+            Resource: !Sub "arn:aws:s3:::${Bucket}/*"
+            Principal:
+              AWS: !Sub "arn:aws:iam::cloudfront:user/CloudFront Origin Access Identity ${CloudFrontOriginAccessIdentity}"
+
+  # Creating a role that it's used for invalidation
+  InvalidationRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: "sts:AssumeRole"
+      # Something like this is needed for showing logs in CloudWatch << ManagedPolicyArns >>
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: invalidation-root
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: logs:CreateLogGroup
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - codepipeline:PutJobFailureResult
+                  - codepipeline:PutJobSuccessResult
+                  - cloudfront:CreateInvalidation
+                Resource: "*"
+
+  # Creating a role that it's used for building the code
+  CodeBuildServiceRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: "sts:AssumeRole"
+      Policies:
+        - PolicyName: root
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Sid: CloudWatchLogsPolicy
+                Effect: Allow
+                Action:
+                  - "logs:CreateLogGroup"
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+                Resource:
+                  - "*"
+              - Sid: S3GetObjectPolicy
+                Effect: Allow
+                Action:
+                  - "s3:GetObject"
+                  - "s3:GetObjectVersion"
+                Resource:
+                  - "*"
+              - Sid: S3PutObjectPolicy
+                Effect: Allow
+                Action:
+                  - "s3:PutObject"
+                Resource:
+                  - "*"
+              - Sid: S3BucketIdentity
+                Effect: Allow
+                Action:
+                  - "s3:GetBucketAcl"
+                  - "s3:GetBucketLocation"
+                Resource:
+                  - "*"
+
+  # Creating a role that it's used by pipeline
+  CodePipelineServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+                - codepipeline.amazonaws.com
+            Action:
+              - "sts:AssumeRole"
+      Description: Role to provide full access for CodePipeline
+      Policies:
+        - PolicyName: EmbeddedInlinePolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: "iam:PassRole"
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    iam:PassedToService:
+                      - "cloudformation.amazonaws.com"
+                      - "elasticbeanstalk.amazonaws.com"
+                      - "ec2.amazonaws.com"
+                      - "ecs-tasks.amazonaws.com"
+                      - "codepipeline.amazonaws.com"
+              - Effect: Allow
+                Action:
+                  # I don't know if all these roles are needed, some of them should be removed
+                  - "elasticbeanstalk:*"
+                  - "ec2:*"
+                  - "elasticloadbalancing:*"
+                  - "autoscaling:*"
+                  - "cloudwatch:*"
+                  - "s3:*"
+                  - "sns:*"
+                  - "cloudformation:*"
+                  - "rds:*"
+                  - "sqs:*"
+                  - "ecs:*"
+                  - "codepipeline:*"
+
+                  - "codecommit:CancelUploadArchive"
+                  - "codecommit:GetBranch"
+                  - "codecommit:GetCommit"
+                  - "codecommit:GetRepository"
+                  - "codecommit:GetUploadArchiveStatus"
+                  - "codecommit:UploadArchive"
+
+                  - "codedeploy:CreateDeployment"
+                  - "codedeploy:GetApplication"
+                  - "codedeploy:GetApplicationRevision"
+                  - "codedeploy:GetDeployment"
+                  - "codedeploy:GetDeploymentConfig"
+                  - "codedeploy:RegisterApplicationRevision"
+
+                  - "lambda:InvokeFunction"
+                  - "lambda:ListFunctions"
+
+                  - "opsworks:CreateDeployment"
+                  - "opsworks:DescribeApps"
+                  - "opsworks:DescribeCommands"
+                  - "opsworks:DescribeDeployments"
+                  - "opsworks:DescribeInstances"
+                  - "opsworks:DescribeStacks"
+                  - "opsworks:UpdateApp"
+
+                  - "codebuild:BatchGetBuilds"
+                  - "codebuild:StartBuild"
+                  - "codebuild:BatchGetBuildBatches"
+                  - "codebuild:StartBuildBatch"
+
+                  - "devicefarm:ListProjects"
+                  - "devicefarm:ListDevicePools"
+                  - "devicefarm:GetRun"
+                  - "devicefarm:GetUpload"
+                  - "devicefarm:CreateUpload"
+                  - "devicefarm:ScheduleRun"
+
+                  - "servicecatalog:ListProvisioningArtifacts"
+                  - "servicecatalog:CreateProvisioningArtifact"
+                  - "servicecatalog:DescribeProvisioningArtifact"
+                  - "servicecatalog:DeleteProvisioningArtifact"
+                  - "servicecatalog:UpdateProduct"
+
+                  - "ecr:DescribeImages"
+
+                  - "states:DescribeExecution"
+                  - "states:DescribeStateMachine"
+                  - "states:StartExecution"
+
+                  - "appconfig:StartDeployment"
+                  - "appconfig:StopDeployment"
+                  - "appconfig:GetDeployment"
+
+                Resource: "*"
+
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonS3FullAccess
+      RoleName: CodePipelineAccess
+
+  # Configure Access to CloudFront
+  CloudFrontOriginAccessIdentity:
+    Type: "AWS::CloudFront::CloudFrontOriginAccessIdentity"
+    Properties:
+      CloudFrontOriginAccessIdentityConfig:
+        Comment: !Sub "access-identity-{Bucket}.s3.amazonaws.com"
+
+  # Configure CloudFront
+  CloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        CustomErrorResponses:
+          - ErrorCode: 403 # not found
+            ResponseCode: 200
+            ResponsePagePath: "/index.html"
+          - ErrorCode: 404 # not found
+            ResponseCode: 200
+            ResponsePagePath: "/index.html"
+        DefaultCacheBehavior:
+          AllowedMethods:
+            - GET
+            - HEAD
+            - OPTIONS
+          CachedMethods:
+            - GET
+            - HEAD
+            - OPTIONS
+          Compress: true
+          DefaultTTL: 3600 # in seconds
+          ForwardedValues:
+            Cookies:
+              Forward: none
+            QueryString: false
+          MaxTTL: 86400 # in seconds
+          MinTTL: 10 # in seconds
+          TargetOriginId: !GetAtt "Bucket.RegionalDomainName"
+          ViewerProtocolPolicy: "allow-all"
+        # This DefaultRootObject configuration is not enough.
+        DefaultRootObject: "-"
+        Enabled: true
+        HttpVersion: http2
+        Origins:
+          - DomainName: !GetAtt "Bucket.RegionalDomainName"
+            Id: !GetAtt "Bucket.RegionalDomainName"
+            S3OriginConfig:
+              OriginAccessIdentity: !Sub "origin-access-identity/cloudfront/${CloudFrontOriginAccessIdentity}"
+        PriceClass: "PriceClass_All"
+
+  # CodeBuild Project that is used for building the project using buildspec.yaml file (or any name that you choose)
+  CodeBuildProject:
+    Type: "AWS::CodeBuild::Project"
+    Properties:
+      Name: !Ref "AWS::StackName"
+      ServiceRole: !GetAtt CodeBuildServiceRole.Arn
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: buildspec.yaml
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: !Ref CodeBuildEnvironmentImage
+      Artifacts:
+        Type: CODEPIPELINE
+
+  # Function that is used for creating invalidation after the deploy stage is finished
+  InvalidationLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: InvalidationLambdaFunction
+      Role: !GetAtt InvalidationRole.Arn
+      Runtime: python3.9
+      Handler: index.lambda_handler
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          code_pipeline = boto3.client("codepipeline")
+          cloud_front = boto3.client("cloudfront")
+          def lambda_handler(event, context):
+              job_id = event["CodePipeline.job"]["id"]
+              try:
+                  user_params = json.loads(
+                      event["CodePipeline.job"]
+                          ["data"]
+                          ["actionConfiguration"]
+                          ["configuration"]
+                          ["UserParameters"]
+                  )
+                  cloud_front.create_invalidation(
+                      DistributionId=user_params["distributionId"],
+                      InvalidationBatch={
+                          "Paths": {
+                              "Quantity": len(user_params["objectPaths"]),
+                              "Items": user_params["objectPaths"],
+                          },
+                          "CallerReference": event["CodePipeline.job"]["id"],
+                      },
+                  )
+              except Exception as e:
+                  print('error: ', e)
+                  code_pipeline.put_job_failure_result(
+                      jobId=job_id,
+                      failureDetails={
+                          "type": "JobFailed",
+                          "message": str(e),
+                      },
+                  )
+              else:
+                  code_pipeline.put_job_success_result(
+                      jobId=job_id,
+                  )
+  # Configure CodePipeline
+  CodePipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      ArtifactStore:
+        Type: "S3"
+        Location: !Ref Bucket
+      Name: !Sub "${Bucket}-CodePipeline"
+      RoleArn: !GetAtt CodePipelineServiceRole.Arn
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: Source
+              InputArtifacts: []
+              ActionTypeId:
+                Category: Source
+                Owner: ThirdParty
+                Version: 1
+                Provider: GitHub
+              OutputArtifacts:
+                - Name: SourceCode
+              Configuration:
+                Owner: !Ref GitHubOwner
+                Repo: !Ref GitHubRepo
+                Branch: !Ref GitHubBranch
+                PollForSourceChanges: false
+                OAuthToken: !Ref GitHubOAuthToken
+              RunOrder: 1
+        - Name: Build
+          Actions:
+            - Name: Build
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: "1"
+              Configuration:
+                ProjectName: !Ref CodeBuildProject
+              OutputArtifacts:
+                - Name: BuildOutput
+              InputArtifacts:
+                - Name: SourceCode
+        - Name: Deploy
+          Actions:
+            - Name: Deploy
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: S3
+                Version: "1"
+              Configuration:
+                BucketName: !Ref Bucket
+                Extract: true
+              InputArtifacts:
+                - Name: BuildOutput
+        - Name: Invalidation
+          Actions:
+            - Name: Invalidation
+              ActionTypeId:
+                Category: Invoke
+                Owner: AWS
+                Provider: Lambda
+                Version: "1"
+              Configuration:
+                FunctionName: InvalidationLambdaFunction
+                UserParameters: !Sub |
+                  {
+                    "distributionId": "${CloudFrontDistribution}",
+                    "objectPaths": ["/*", "/index.html"]
+                  }
+  # 'GithubWebhook' satisfies two requirements:
+  # -- Means that updates are pushed from GitHub, rather than AWS having to poll
+  # -- Means we can filter for required changes
+  GithubWebhook:
+    Type: "AWS::CodePipeline::Webhook"
+    Properties:
+      Authentication: GITHUB_HMAC
+      AuthenticationConfiguration:
+        SecretToken: !Ref GitHubOAuthToken
+      RegisterWithThirdParty: true
+      Filters:
+        - JsonPath: "$.ref"
+          MatchEquals: refs/heads/{Branch}
+      TargetPipeline: !Ref CodePipeline
+      TargetAction: Source
+      TargetPipelineVersion: !GetAtt CodePipeline.Version
